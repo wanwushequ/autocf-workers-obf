@@ -3,8 +3,6 @@ name: timer-get-autocf-workers-obf
 on:
   workflow_dispatch:
   schedule:
-    # 北京时间 06:00 -> UTC 22:00 (前一天)
-    # 北京时间 18:00 -> UTC 10:00
     - cron: '0 10,22 * * *'
 
 permissions:
@@ -20,71 +18,58 @@ jobs:
       - name: Process Workers
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USER_NAME: "wanwushequ"
         run: |
-          # 1. 定义配置数组：[源Raw链接]|[API查询链接]|[目标相对路径]
-          # 方便后续维护，只需按格式添加行即可
+          # 仓库名 | 分支 | 目标路径
           WORKERS_CONFIG=(
-            "https://raw.githubusercontent.com/wanwushequ/byJoey-cfnew-2.9.6/refs/heads/main/_worker.js|https://api.github.com/repos/wanwushequ/byJoey-cfnew-2.9.6/contents/_worker.js|workers/bj/2.9.6/_worker.js"
-            "https://raw.githubusercontent.com/wanwushequ/BPB-Worker-Panel/refs/heads/main/_worker.js|https://api.github.com/repos/wanwushequ/BPB-Worker-Panel/contents/_worker.js|workers/bpb/4.1.3/_worker.js"
-            "https://raw.githubusercontent.com/wanwushequ/6Kmfi6HP-EDtunnel-2.0.0/refs/heads/main/_worker.js|https://api.github.com/repos/wanwushequ/6Kmfi6HP-EDtunnel-2.0.0/contents/_worker.js|workers/3k/2.0.0/_worker.js"
+            "byJoey-cfnew-2.9.6|main|workers/bj/2.9.6/_worker.js"
+            "BPB-Worker-Panel-4.1.3|main|workers/bpb/4.1.3/_worker.js"
+            "6Kmfi6HP-EDtunnel-2.0.0|main|workers/3k/2.0.0/_worker.js"
           )
 
           for item in "${WORKERS_CONFIG[@]}"; do
-            # 解析数组项
-            IFS='|' read -r RAW_URL API_URL DEST_PATH <<< "$item"
-            echo "-------------------------------------------------------"
-            echo "开始处理: $DEST_PATH"
+            IFS='|' read -r REPO_NAME BRANCH DEST_PATH <<< "$item"
+            
+            # 拼接
+            RAW_URL="https://raw.githubusercontent.com/${USER_NAME}/${REPO_NAME}/refs/heads/${BRANCH}/_worker.js"
+            API_URL="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/contents/_worker.js"
 
-            # 2. 获取远程预期 Hash (带 3 次重试机制)
+            echo "开始处理: $REPO_NAME -> $DEST_PATH"
+
+            # 获取 Hash 并重试
             EXPECTED_SHA=""
             for i in {1..3}; do
-              echo "正在获取 API Hash (尝试 $i/3)..."
-              # 使用 GITHUB_TOKEN 避免限流
               EXPECTED_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" "$API_URL" | jq -r '.sha' || echo "")
-              if [ "$EXPECTED_SHA" != "null" ] && [ -n "$EXPECTED_SHA" ]; then
-                break
-              fi
-              echo "获取失败，5秒后重试..."
+              [ "$EXPECTED_SHA" != "null" ] && [ -n "$EXPECTED_SHA" ] && break
               sleep 5
             done
 
             if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" == "null" ]; then
-              echo "错误: 无法获取远程 Hash，跳过此文件。"
+              echo "跳过：无法获取 $REPO_NAME 的 Hash"
               continue
             fi
 
-            # 3. 下载文件并建立目录结构
+            # 下载
             mkdir -p "$(dirname "$DEST_PATH")"
-            if ! curl -L -o "$DEST_PATH" "$RAW_URL"; then
-              echo "错误: 下载失败，跳过此文件。"
-              continue
-            fi
+            curl -L -s -o "$DEST_PATH" "$RAW_URL"
 
-            # 4. 计算本地下载文件的 Git Blob SHA
-            # 公式：sha1("blob " + 文件长度 + "\0" + 文件内容)
+            # 计算 Git Blob SHA
             LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
 
-            # 5. 校验下载完整性
+            # 校验
             if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
-              echo "校验失败: 本地 Hash ($LOCAL_SHA) 与远程 ($EXPECTED_SHA) 不一致！跳过。"
-              # 还原文件，避免错误覆盖
+              echo "Hash 不匹配，跳过 $REPO_NAME"
               git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
               continue
             fi
-
-            echo "校验成功: 文件完整。"
+            echo "校验通过。"
           done
 
-          # 6. 统一提交变更
+          # 提交变更
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          
           git add workers/
-          
-          if git diff --staged --quiet; then
-            echo "所有文件均未发生变化，无需提交。"
-          else
-            echo "检测到内容更新，正在执行提交..."
-            git commit -m "Automated Sync: Updated workers at $(date '+%Y-%m-%d %H:%M:%S')"
+          if ! git diff --staged --quiet; then
+            git commit -m "Automated Sync: $(date '+%Y-%m-%d %H:%M')"
             git push origin HEAD:${{ github.ref }}
           fi
