@@ -69,7 +69,17 @@ jobs:
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add workers/
+
+          # 提交日志
           if ! git diff --staged --quiet; then
+            echo "-------------------------------------------------------"
+            echo "检测到内容更新，本次更新覆盖的文件路径如下："
+            git diff --staged --name-only[cite: 1]
+            echo "-------------------------------------------------------"
+            
             git commit -m "Automated Sync: $(date '+%Y-%m-%d %H:%M')"
             git push origin HEAD:${{ github.ref }}
+            echo "提交执行完毕。"
+          else
+            echo "所有文件均未发生变化，无需提交。"
           fi
