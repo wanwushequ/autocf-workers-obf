@@ -74,7 +74,7 @@ jobs:
           if ! git diff --staged --quiet; then
             echo "-------------------------------------------------------"
             echo "检测到内容更新，本次更新覆盖的文件路径如下："
-            git diff --staged --name-only[cite: 1]
+            git diff --staged --name-only
             echo "-------------------------------------------------------"
             
             git commit -m "Automated Sync: $(date '+%Y-%m-%d %H:%M')"
