@@ -77,7 +77,8 @@ jobs:
             git diff --staged --name-only
             echo "-------------------------------------------------------"
             
-            git commit -m "Automated Sync: $(date '+%Y-%m-%d %H:%M')"
+            NOW=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
+            git commit -m "$(date '+%Y-%m-%d %H:%M')"
             git push origin HEAD:${{ github.ref }}
             echo "提交执行完毕。"
           else
