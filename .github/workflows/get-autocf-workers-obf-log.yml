@@ -1,4 +1,4 @@
-name: timer-get-autocf-workers-obf
+name: timer-get-autocf-workers-obf-log
 
 on:
   workflow_dispatch:
