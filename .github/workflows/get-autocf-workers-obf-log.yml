@@ -29,6 +29,8 @@ jobs:
           )
 
           declare -A UPDATED_FILE_TIMES
+          TOTAL_FILES=0
+          UPDATED_COUNT=0
 
           for item in "${WORKERS_CONFIG[@]}"; do
             IFS='|' read -r REPO_NAME BRANCH DEST_PATH <<< "$item"
@@ -36,16 +38,22 @@ jobs:
             RAW_URL="https://raw.githubusercontent.com/${USER_NAME}/${REPO_NAME}/refs/heads/${BRANCH}/_worker.js"
             API_URL="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/contents/_worker.js"
 
-            echo "开始处理: $REPO_NAME -> $DEST_PATH"
+            echo ""
+            echo "=========================================="
+            echo "📁 处理: $REPO_NAME"
+            echo "📍 目标路径: $DEST_PATH"
+            echo "=========================================="
+
+            TOTAL_FILES=$((TOTAL_FILES + 1))
 
             EXPECTED_SHA=""
             for i in {1..3}; do
               EXPECTED_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" "$API_URL" | jq -r '.sha' || echo "")
               if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ]; then
-                echo "获取 SHA 成功"
+                echo "✅ 获取远程 SHA 成功: ${EXPECTED_SHA:0:7}..."
                 break
               fi
-              echo "第${i}次获取 SHA 失败，重试中..."
+              echo "⚠️ 第${i}次获取 SHA 失败，重试中..."
               sleep 3
             done
 
@@ -57,33 +65,36 @@ jobs:
               LOCAL_SHA=""
               if [ -f "$DEST_PATH" ]; then
                 LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+                echo "📂 本地 SHA: ${LOCAL_SHA:0:7}..."
+              else
+                echo "📂 本地文件不存在"
               fi
               if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
                 NEED_UPDATE=true
-                echo "远程文件已更新，需要下载"
+                echo "🔄 远程文件已更新，需要下载"
               else
-                echo "文件无变化，跳过"
+                echo "✅ 文件无变化，跳过"
               fi
             else
-              echo "警告：获取 SHA 失败，强制下载更新"
+              echo "❌ 警告：获取 SHA 失败，强制下载更新"
               NEED_UPDATE=true
             fi
 
             if [ "$NEED_UPDATE" = true ]; then
-              echo "开始下载..."
+              echo "📥 开始下载..."
               mkdir -p "$(dirname "$DEST_PATH")"
               curl -L -s -o "$DEST_PATH" "$RAW_URL"
               
               if [ "$GET_SHA_SUCCESS" = true ]; then
                 NEW_LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
                 if [ "$EXPECTED_SHA" != "$NEW_LOCAL_SHA" ]; then
-                  echo "下载文件损坏，回滚"
+                  echo "❌ 下载文件损坏，回滚"
                   git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
                   continue
                 fi
-                echo "校验通过"
+                echo "✅ 校验通过"
               else
-                echo "跳过校验（SHA获取失败）"
+                echo "⚠️ 跳过校验（SHA获取失败）"
               fi
               
               FILE_TIME=""
@@ -103,15 +114,34 @@ jobs:
               fi
               
               UPDATED_FILE_TIMES["$DEST_PATH"]="$FILE_TIME"
-              echo "文件已更新，时间: $FILE_TIME"
+              UPDATED_COUNT=$((UPDATED_COUNT + 1))
+              echo "✅ 文件已更新，时间: $FILE_TIME"
             fi
           done
+
+          echo ""
+          echo "=========================================="
+          echo "📊 统计报告"
+          echo "=========================================="
+          echo "📁 总文件数: $TOTAL_FILES"
+          echo "🔄 更新文件数: $UPDATED_COUNT"
+          echo "⏭️ 跳过文件数: $((TOTAL_FILES - UPDATED_COUNT))"
+          
+          if [ $UPDATED_COUNT -gt 0 ]; then
+            echo ""
+            echo "📝 更新的文件列表："
+            for file in "${!UPDATED_FILE_TIMES[@]}"; do
+              echo "   ✅ $file | ${UPDATED_FILE_TIMES[$file]}"
+            done
+          fi
+          echo "=========================================="
 
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add workers/
 
           if [ ${#UPDATED_FILE_TIMES[@]} -gt 0 ]; then
+            echo ""
             echo "-------------------------------------------------------"
             echo "检测到内容更新，本次更新覆盖的文件路径如下："
             for file in "${!UPDATED_FILE_TIMES[@]}"; do
