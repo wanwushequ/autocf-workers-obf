@@ -1,0 +1,113 @@
+name: timer-get-autocf-workers-obf-log
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 10,22 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync-workers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Process Workers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          USER_NAME: "wanwushequ"
+        run: |
+          WORKERS_CONFIG=(
+            "cmliu-edgetunnel-2.1|main|workers/cm/2.1/_worker.js"
+            "cmliu-edgetunnel-2.0|main|workers/cm/2.0/_worker.js"
+            "byJoey-cfnew-2.9.6|main|workers/bj/2.9.6/_worker.js"
+            "BPB-Worker-Panel-4.1.3|main|workers/bpb/4.1.3/_worker.js"
+            "6Kmfi6HP-EDtunnel-2.0.0|main|workers/3k/2.0.0/_worker.js"
+          )
+
+          for item in "${WORKERS_CONFIG[@]}"; do
+            IFS='|' read -r REPO_NAME BRANCH DEST_PATH <<< "$item"
+            
+            RAW_URL="https://raw.githubusercontent.com/${USER_NAME}/${REPO_NAME}/refs/heads/${BRANCH}/_worker.js"
+            API_URL="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/contents/_worker.js"
+
+            echo "开始处理: $REPO_NAME -> $DEST_PATH"
+
+            EXPECTED_SHA=""
+            for i in {1..3}; do
+              EXPECTED_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" "$API_URL" | jq -r '.sha' || echo "")
+              [ "$EXPECTED_SHA" != "null" ] && [ -n "$EXPECTED_SHA" ] && break
+              sleep 5
+            done
+
+            if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" == "null" ]; then
+              echo "跳过：无法获取 $REPO_NAME 的 Hash"
+              continue
+            fi
+
+            mkdir -p "$(dirname "$DEST_PATH")"
+            curl -L -s -o "$DEST_PATH" "$RAW_URL"
+
+            LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+
+            if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
+              echo "Hash 不匹配，跳过 $REPO_NAME"
+              git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
+              continue
+            fi
+            echo "校验通过。"
+          done
+
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add workers/
+
+          if ! git diff --staged --quiet; then
+            echo "-------------------------------------------------------"
+            echo "检测到内容更新，本次更新覆盖的文件路径如下："
+            UPDATED_FILES=$(git diff --staged --name-only)
+            echo "$UPDATED_FILES"
+            echo "-------------------------------------------------------"
+            
+            BEIJING_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
+            
+            LOG_TEMP=$(mktemp)
+            CARD_TEMP=$(mktemp)
+            
+            NEW_LOG_ENTRIES=""
+            NEW_CARD_ENTRY=""
+            
+            while IFS= read -r file; do
+              if [ -n "$file" ]; then
+                LOG_ENTRY="${file}|${BEIJING_TIME}"
+                NEW_LOG_ENTRIES="${NEW_LOG_ENTRIES}${LOG_ENTRY}\n"
+                NEW_CARD_ENTRY="${file}|${BEIJING_TIME}\n"
+              fi
+            done <<< "$UPDATED_FILES"
+            
+            if [ -f "log.txt" ]; then
+              OLD_CONTENT=$(cat log.txt)
+              printf "%b%s" "${NEW_LOG_ENTRIES}" "$OLD_CONTENT" > log.txt
+            else
+              printf "%b" "${NEW_LOG_ENTRIES}" > log.txt
+            fi
+            
+            FIRST_FILE=$(echo "$UPDATED_FILES" | head -1)
+            if [ -n "$FIRST_FILE" ]; then
+              echo "${FIRST_FILE}|${BEIJING_TIME}" > card.txt
+            else
+              echo "no_update|${BEIJING_TIME}" > card.txt
+            fi
+            
+            git add log.txt card.txt 2>/dev/null || true
+            
+            NOW=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
+            git commit -m "$(date '+%Y-%m-%d %H:%M')"
+            git push origin HEAD:${{ github.ref }}
+            echo "提交执行完毕。"
+          else
+            echo "所有文件均未发生变化，无需提交。"
+          fi

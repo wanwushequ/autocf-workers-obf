@@ -1,4 +1,4 @@
-name: timer-get-autocf-workers-obf-log
+name: timer-get-autocf-workers-obf
 
 on:
   workflow_dispatch:
@@ -28,6 +28,8 @@ jobs:
             "6Kmfi6HP-EDtunnel-2.0.0|main|workers/3k/2.0.0/_worker.js"
           )
 
+          declare -A UPDATED_FILE_TIMES
+
           for item in "${WORKERS_CONFIG[@]}"; do
             IFS='|' read -r REPO_NAME BRANCH DEST_PATH <<< "$item"
             
@@ -39,54 +41,88 @@ jobs:
             EXPECTED_SHA=""
             for i in {1..3}; do
               EXPECTED_SHA=$(curl -s -H "Authorization: token $GH_TOKEN" "$API_URL" | jq -r '.sha' || echo "")
-              [ "$EXPECTED_SHA" != "null" ] && [ -n "$EXPECTED_SHA" ] && break
-              sleep 5
+              if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ]; then
+                echo "获取 SHA 成功"
+                break
+              fi
+              echo "第${i}次获取 SHA 失败，重试中..."
+              sleep 3
             done
 
-            if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" == "null" ]; then
-              echo "跳过：无法获取 $REPO_NAME 的 Hash"
-              continue
+            NEED_UPDATE=false
+            GET_SHA_SUCCESS=false
+            
+            if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ]; then
+              GET_SHA_SUCCESS=true
+              LOCAL_SHA=""
+              if [ -f "$DEST_PATH" ]; then
+                LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+              fi
+              if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
+                NEED_UPDATE=true
+                echo "远程文件已更新，需要下载"
+              else
+                echo "文件无变化，跳过"
+              fi
+            else
+              echo "警告：获取 SHA 失败，强制下载更新"
+              NEED_UPDATE=true
             fi
 
-            mkdir -p "$(dirname "$DEST_PATH")"
-            curl -L -s -o "$DEST_PATH" "$RAW_URL"
-
-            LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
-
-            if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
-              echo "Hash 不匹配，跳过 $REPO_NAME"
-              git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
-              continue
+            if [ "$NEED_UPDATE" = true ]; then
+              echo "开始下载..."
+              mkdir -p "$(dirname "$DEST_PATH")"
+              curl -L -s -o "$DEST_PATH" "$RAW_URL"
+              
+              if [ "$GET_SHA_SUCCESS" = true ]; then
+                NEW_LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+                if [ "$EXPECTED_SHA" != "$NEW_LOCAL_SHA" ]; then
+                  echo "下载文件损坏，回滚"
+                  git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
+                  continue
+                fi
+                echo "校验通过"
+              else
+                echo "跳过校验（SHA获取失败）"
+              fi
+              
+              FILE_TIME=""
+              if [ "$GET_SHA_SUCCESS" = true ]; then
+                COMMIT_API="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/commits?path=_worker.js&page=1&per_page=1"
+                LAST_MODIFIED=$(curl -s -H "Authorization: token $GH_TOKEN" "$COMMIT_API" | jq -r '.[0].commit.committer.date // ""')
+                if [ -n "$LAST_MODIFIED" ] && [ "$LAST_MODIFIED" != "null" ]; then
+                  FILE_TIME=$(TZ='Asia/Shanghai' date -d "$LAST_MODIFIED" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
+                  if [ -z "$FILE_TIME" ]; then
+                    FILE_TIME=$(TZ='Asia/Shanghai' date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_MODIFIED" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
+                  fi
+                fi
+              fi
+              
+              if [ -z "$FILE_TIME" ]; then
+                FILE_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
+              fi
+              
+              UPDATED_FILE_TIMES["$DEST_PATH"]="$FILE_TIME"
+              echo "文件已更新，时间: $FILE_TIME"
             fi
-            echo "校验通过。"
           done
 
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           git add workers/
 
-          if ! git diff --staged --quiet; then
+          if [ ${#UPDATED_FILE_TIMES[@]} -gt 0 ]; then
             echo "-------------------------------------------------------"
             echo "检测到内容更新，本次更新覆盖的文件路径如下："
-            UPDATED_FILES=$(git diff --staged --name-only)
-            echo "$UPDATED_FILES"
+            for file in "${!UPDATED_FILE_TIMES[@]}"; do
+              echo "$file"
+            done
             echo "-------------------------------------------------------"
             
-            BEIJING_TIME=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
-            
-            LOG_TEMP=$(mktemp)
-            CARD_TEMP=$(mktemp)
-            
             NEW_LOG_ENTRIES=""
-            NEW_CARD_ENTRY=""
-            
-            while IFS= read -r file; do
-              if [ -n "$file" ]; then
-                LOG_ENTRY="${file}|${BEIJING_TIME}"
-                NEW_LOG_ENTRIES="${NEW_LOG_ENTRIES}${LOG_ENTRY}\n"
-                NEW_CARD_ENTRY="${file}|${BEIJING_TIME}\n"
-              fi
-            done <<< "$UPDATED_FILES"
+            for file in "${!UPDATED_FILE_TIMES[@]}"; do
+              NEW_LOG_ENTRIES="${NEW_LOG_ENTRIES}${file}|${UPDATED_FILE_TIMES[$file]}\n"
+            done
             
             if [ -f "log.txt" ]; then
               OLD_CONTENT=$(cat log.txt)
@@ -95,12 +131,10 @@ jobs:
               printf "%b" "${NEW_LOG_ENTRIES}" > log.txt
             fi
             
-            FIRST_FILE=$(echo "$UPDATED_FILES" | head -1)
-            if [ -n "$FIRST_FILE" ]; then
-              echo "${FIRST_FILE}|${BEIJING_TIME}" > card.txt
-            else
-              echo "no_update|${BEIJING_TIME}" > card.txt
-            fi
+            > card.txt
+            for file in "${!UPDATED_FILE_TIMES[@]}"; do
+              echo "${file}|${UPDATED_FILE_TIMES[$file]}" >> card.txt
+            done
             
             git add log.txt card.txt 2>/dev/null || true
             
