@@ -161,12 +161,12 @@ jobs:
               printf "%b" "${NEW_LOG_ENTRIES}" > log.txt
             fi
             
-            > card.txt
+            > workers-date-card.txt
             for file in "${!UPDATED_FILE_TIMES[@]}"; do
-              echo "${file}|${UPDATED_FILE_TIMES[$file]}" >> card.txt
+              echo "${file}|${UPDATED_FILE_TIMES[$file]}" >> workers-date-card.txt
             done
             
-            git add log.txt card.txt 2>/dev/null || true
+            git add log.txt workers-date-card.txt 2>/dev/null || true
             
             NOW=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
             git commit -m "$(date '+%Y-%m-%d %H:%M')"
