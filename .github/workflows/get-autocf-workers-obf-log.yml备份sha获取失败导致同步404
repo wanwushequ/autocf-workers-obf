@@ -33,7 +33,6 @@ jobs:
           declare -A UPDATED_FILE_TIMES
           TOTAL_FILES=0
           UPDATED_COUNT=0
-          FAILED_COUNT=0
 
           for item in "${WORKERS_CONFIG[@]}"; do
             IFS='|' read -r REPO_NAME BRANCH DEST_PATH <<< "$item"
@@ -60,29 +59,27 @@ jobs:
               sleep 3
             done
 
-            # 【核心修改点 1】: 如果 3 次尝试后依然获取不到远程 SHA，直接报警并跳过该文件，防止覆写损坏文件
-            if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" = "null" ]; then
-              echo "❌ 严重错误：连续 3 次获取远程 SHA 失败（可能遭遇限流或网络故障）。"
-              echo "⚠️ 安全策略：跳过对 $REPO_NAME 的本次更新，保持本地文件不变。"
-              FAILED_COUNT=$((FAILED_COUNT + 1))
-              continue
-            fi
-
             NEED_UPDATE=false
-            LOCAL_SHA=""
+            GET_SHA_SUCCESS=false
             
-            if [ -f "$DEST_PATH" ]; then
-              LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
-              echo "📂 本地 SHA: ${LOCAL_SHA:0:7}..."
+            if [ -n "$EXPECTED_SHA" ] && [ "$EXPECTED_SHA" != "null" ]; then
+              GET_SHA_SUCCESS=true
+              LOCAL_SHA=""
+              if [ -f "$DEST_PATH" ]; then
+                LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+                echo "📂 本地 SHA: ${LOCAL_SHA:0:7}..."
+              else
+                echo "📂 本地文件不存在"
+              fi
+              if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
+                NEED_UPDATE=true
+                echo "🔄 远程文件已更新，需要下载"
+              else
+                echo "✅ 文件无变化，跳过"
+              fi
             else
-              echo "📂 本地文件不存在"
-            fi
-
-            if [ "$EXPECTED_SHA" != "$LOCAL_SHA" ]; then
+              echo "❌ 警告：获取 SHA 失败，强制下载更新"
               NEED_UPDATE=true
-              echo "🔄 远程文件已更新，需要下载"
-            else
-              echo "✅ 文件无变化，跳过"
             fi
 
             if [ "$NEED_UPDATE" = true ]; then
@@ -90,24 +87,27 @@ jobs:
               mkdir -p "$(dirname "$DEST_PATH")"
               curl -L -s -o "$DEST_PATH" "$RAW_URL"
               
-              # 下载后进行严密校验
-              NEW_LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
-              if [ "$EXPECTED_SHA" != "$NEW_LOCAL_SHA" ]; then
-                echo "❌ 下载文件损坏（SHA 校验不匹配），正在回滚..."
-                git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
-                FAILED_COUNT=$((FAILED_COUNT + 1))
-                continue
+              if [ "$GET_SHA_SUCCESS" = true ]; then
+                NEW_LOCAL_SHA=$( (printf "blob $(stat -c%s "$DEST_PATH")\0"; cat "$DEST_PATH") | sha1sum | awk '{print $1}')
+                if [ "$EXPECTED_SHA" != "$NEW_LOCAL_SHA" ]; then
+                  echo "❌ 下载文件损坏，回滚"
+                  git checkout -- "$DEST_PATH" 2>/dev/null || rm "$DEST_PATH"
+                  continue
+                fi
+                echo "✅ 校验通过"
+              else
+                echo "⚠️ 跳过校验（SHA获取失败）"
               fi
-              echo "✅ 校验通过"
               
-              # 获取远程提交时间
               FILE_TIME=""
-              COMMIT_API="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/commits?path=_worker.js&page=1&per_page=1"
-              LAST_MODIFIED=$(curl -s -H "Authorization: token $GH_TOKEN" "$COMMIT_API" | jq -r '.[0].commit.committer.date // ""')
-              if [ -n "$LAST_MODIFIED" ] && [ "$LAST_MODIFIED" != "null" ]; then
-                FILE_TIME=$(TZ='Asia/Shanghai' date -d "$LAST_MODIFIED" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
-                if [ -z "$FILE_TIME" ]; then
-                  FILE_TIME=$(TZ='Asia/Shanghai' date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_MODIFIED" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
+              if [ "$GET_SHA_SUCCESS" = true ]; then
+                COMMIT_API="https://api.github.com/repos/${USER_NAME}/${REPO_NAME}/commits?path=_worker.js&page=1&per_page=1"
+                LAST_MODIFIED=$(curl -s -H "Authorization: token $GH_TOKEN" "$COMMIT_API" | jq -r '.[0].commit.committer.date // ""')
+                if [ -n "$LAST_MODIFIED" ] && [ "$LAST_MODIFIED" != "null" ]; then
+                  FILE_TIME=$(TZ='Asia/Shanghai' date -d "$LAST_MODIFIED" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
+                  if [ -z "$FILE_TIME" ]; then
+                    FILE_TIME=$(TZ='Asia/Shanghai' date -j -f "%Y-%m-%dT%H:%M:%SZ" "$LAST_MODIFIED" '+%Y-%m-%d %H:%M' 2>/dev/null || echo "")
+                  fi
                 fi
               fi
               
@@ -125,26 +125,24 @@ jobs:
           echo "=========================================="
           echo "📊 统计报告"
           echo "=========================================="
-          echo "📁 总任务数: $TOTAL_FILES"
-          echo "🔄 成功更新数: $UPDATED_COUNT"
-          echo "❌ 失败/跳过数: $FAILED_COUNT"
-          echo "⏭️ 无变化跳过: $((TOTAL_FILES - UPDATED_COUNT - FAILED_COUNT))"
+          echo "📁 总文件数: $TOTAL_FILES"
+          echo "🔄 更新文件数: $UPDATED_COUNT"
+          echo "⏭️ 跳过文件数: $((TOTAL_FILES - UPDATED_COUNT))"
           
           if [ $UPDATED_COUNT -gt 0 ]; then
             echo ""
-            echo "📝 本次成功更新的文件列表："
+            echo "📝 更新的文件列表："
             for file in "${!UPDATED_FILE_TIMES[@]}"; do
               echo "   ✅ $file | ${UPDATED_FILE_TIMES[$file]}"
             done
           fi
           echo "=========================================="
 
-          # 如果发生更新，执行 Git 提交
-          if [ ${#UPDATED_FILE_TIMES[@]} -gt 0 ]; then
-            git config --local user.email "github-actions[bot]@users.noreply.github.com"
-            git config --local user.name "github-actions[bot]"
-            git add workers/
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add workers/
 
+          if [ ${#UPDATED_FILE_TIMES[@]} -gt 0 ]; then
             echo ""
             echo "-------------------------------------------------------"
             echo "检测到内容更新，本次更新覆盖的文件路径如下："
@@ -173,9 +171,9 @@ jobs:
             git add log.txt workers-date-card.txt 2>/dev/null || true
             
             NOW=$(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M')
-            git commit -m "$NOW"
+            git commit -m "$(date '+%Y-%m-%d %H:%M')"
             git push origin HEAD:${{ github.ref }}
             echo "提交执行完毕。"
           else
-            echo "所有文件均未发生有效变化，或因获取 SHA 失败已安全跳过，无需提交。"
+            echo "所有文件均未发生变化，无需提交。"
           fi
