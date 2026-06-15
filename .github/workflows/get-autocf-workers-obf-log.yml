@@ -3,7 +3,7 @@ name: timer-get-autocf-workers-obf
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 8,21 * * *'
+    - cron: '0 7,20 * * *'
 
 permissions:
   contents: write
