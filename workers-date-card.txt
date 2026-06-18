@@ -1,4 +1,5 @@
 workers/bpb/4.2.2/_worker.js|2026-06-18 04:59
+workers/bpb/4.2.3/_worker.js|2026-06-18 13:20
 workers/bpb/4.1.3/_worker.js|2026-06-18 05:13
 workers/3k/2.0.0/_worker.js|2026-06-18 04:59
 workers/bj/2.9.6/_worker.js|2026-06-18 05:01
